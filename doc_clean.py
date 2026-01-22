@@ -103,18 +103,21 @@ async def processed_doc(doc: Document, semaphore: Semaphore, cache: dict) -> Non
                     tasks = [chain.ainvoke({'search_results': result, 'content': chunk}) for chunk in chunks]
                     all_reports = await asyncio.gather(*tasks)
 
+                    # 逻辑聚合
                     scores = [r.score for r in all_reports]
                     statuses = [r.status for r in all_reports]
                     final_status = "垃圾" if "垃圾" in statuses else max(set(statuses), key=statuses.count)
                     final_score = int(statistics.mean(scores) * 0.4 + min(scores) * 0.6)
 
                     all_reasons_text = '\n'.join([f'块{i + 1}: {r.reason}' for i, r in enumerate(all_reports)])
+                    # 总结请求
                     summary_res = await qwen.ainvoke(
                         f"你是一个总结专家，请用一段话精炼总结以下审计理由，直接输出结论：\n{all_reasons_text}")
                     report = AuditResult(status=final_status, score=final_score, reason=summary_res.content)
                 else:
                     report = await chain.ainvoke({'search_results': result, 'content': content})
 
+                # 存入内存 cache
                 cache[content_md5] = report.model_dump()
             except Exception as e:
                 print(f"❌ 处理 {file_name} 时出错: {e}")
@@ -124,43 +127,56 @@ async def processed_doc(doc: Document, semaphore: Semaphore, cache: dict) -> Non
         target_folder = CLEAN_DIR if "合格" in report.status else (
             TRASH_DIR if "垃圾" in report.status else os.path.join(SOURCE_DIR, "Need_Human_Check"))
 
-        # 新增：在分类目录下创建 picture 文件夹
         target_pix_dir = os.path.join(target_folder, "picture")
         os.makedirs(target_pix_dir, exist_ok=True)
 
-        # 新增：同步搬运图片文件
+        # 3. 同步搬运图片文件并更新 Markdown 内部引用路径
         img_links = re.findall(r'!\[.*?\]\((.*?)\)', content)
+        updated_content = content
+
         for rel_img_path in img_links:
             if rel_img_path.startswith(('http', 'https')): continue
 
-            # 物理路径溯源：根据 md 里的路径找到硬盘里的图
+            # 物理路径溯源
             abs_img_src = os.path.abspath(os.path.join(origin_dir, rel_img_path))
 
             if os.path.exists(abs_img_src):
                 img_name = os.path.basename(abs_img_src)
                 abs_img_dest = os.path.join(target_pix_dir, img_name)
                 try:
-                    # 用 copy2 保证图片属性不变，且不破坏其他 md 对原图的引用
+                    # 物理复制图片
                     shutil.copy2(abs_img_src, abs_img_dest)
-                except Exception as e:
-                    print(f"⚠️ 图片搬运失败: {img_name} | {e}")
 
-        # 3. 执行移动与盖章 (保留你的原有逻辑)
+                    # 修改 MD 内容中的路径：将原路径改为统一的相对路径 "picture/文件名"
+                    # 这样后续无论是本地预览还是 AI 再次读取，路径都是有效的
+                    new_rel_link = f"picture/{img_name}"
+                    updated_content = updated_content.replace(rel_img_path, new_rel_link)
+                except Exception as e:
+                    print(f"⚠️ 图片搬运或路径更新失败: {img_name} | {e}")
+
+        # 4. 执行移动与盖章
         dest = os.path.join(target_folder, file_name)
 
-        # 如果是合格，先打戳再移动
-        if "合格" in report.status:
-            save_metadata_to_file(origin_path, report)
+        try:
+            # 关键：先将更新了图片路径的内容写回原始位置
+            # 这样 save_metadata_to_file 读取的就是带有正确相对路径的文件
+            with open(origin_path, 'w', encoding='utf-8') as f:
+                f.write(updated_content)
 
-        # 移动 MD 文件
-        shutil.move(origin_path, dest)
+            if "合格" in report.status:
+                save_metadata_to_file(origin_path, report)
 
-        # 4. 实时播报 (完全按照你的要求保留)
+            # 移动最终的 MD 文件
+            shutil.move(origin_path, dest)
+        except Exception as e:
+            print(f"🚚 文件移动或打戳失败: {e}")
+
+        # 5. 实时播报
         print("\n" + "=" * 50)
         print(f"✅ 处理完成 >> 📄 {file_name}")
         print(f"⚖️ 结论: {report.status} | 分数: {report.score}")
         print(f"📝 理由: {report.reason}")
-        print(f"🖼️ 关联图片已同步至: {target_pix_dir}")
+        print(f"🖼️ 关联图片已重定向并同步至: {target_pix_dir}")
         print("=" * 50)
 
 
