@@ -83,102 +83,111 @@ def save_cache(cache_file: str, data: dict):
 
 async def processed_doc(doc: Document, semaphore: Semaphore, cache: dict) -> None:
     async with semaphore:
+        # 1. 获取路径信息并生成“唯一安全指纹”
         origin_path = doc.metadata['source']
-        file_name = os.path.basename(origin_path)
-        origin_dir = os.path.dirname(origin_path)  # 获取原文件所在目录
+        origin_dir = os.path.dirname(origin_path)
+        display_name = os.path.basename(origin_path)
+
+        # --- 【关键逻辑：路径扁平化】 ---
+        # 即使不同文件夹下都有 README.md，rel_path 也会是 "repo1/README.md" 和 "repo2/README.md"
+        rel_path = os.path.relpath(origin_path, RAW_DIR)
+        # 转换后变成 "repo1_README.md" 和 "repo2_README.md"
+        safe_file_name = rel_path.replace(os.sep, "_")
+
         content = doc.page_content
         content_md5 = calculate_md5(content)
 
-        # 1. 缓存与审计逻辑 (完全保留你的逻辑)
+        # 2. 审计与缓存逻辑
         if content_md5 in cache:
             report_data = cache[content_md5]
             report = AuditResult(**report_data)
-            print(f"⚡️ 缓存命中: {file_name}")
+            print(f"⚡️ 缓存命中: {display_name}")
         else:
             try:
-                query = f"验证ai技术点: {file_name} {content[:100]}"
-                result = await search_tool.ainvoke(query)
+                # 使用 Tavily 搜索辅助审计
+                query = f"验证 AI 技术点: {display_name} {content[:100]}"
+                search_results = await search_tool.ainvoke(query)
 
                 if len(content) > 15000:
                     chunks = text_splitter.split_text(content)
-                    tasks = [chain.ainvoke({'search_results': result, 'content': chunk}) for chunk in chunks]
+                    tasks = [chain.ainvoke({'search_results': search_results, 'content': chunk}) for chunk in chunks]
                     all_reports = await asyncio.gather(*tasks)
-
-                    # 逻辑聚合
+                    # 聚合逻辑
                     scores = [r.score for r in all_reports]
                     statuses = [r.status for r in all_reports]
                     final_status = "垃圾" if "垃圾" in statuses else max(set(statuses), key=statuses.count)
                     final_score = int(statistics.mean(scores) * 0.4 + min(scores) * 0.6)
-
-                    all_reasons_text = '\n'.join([f'块{i + 1}: {r.reason}' for i, r in enumerate(all_reports)])
-                    # 总结请求
                     summary_res = await qwen.ainvoke(
-                        f"你是一个总结专家，请用一段话精炼总结以下审计理由，直接输出结论：\n{all_reasons_text}")
+                        f"请简练总结以下审计理由：\n" + "\n".join([r.reason for r in all_reports]))
                     report = AuditResult(status=final_status, score=final_score, reason=summary_res.content)
                 else:
-                    report = await chain.ainvoke({'search_results': result, 'content': content})
+                    report = await chain.ainvoke({'search_results': search_results, 'content': content})
 
-                # 存入内存 cache
                 cache[content_md5] = report.model_dump()
             except Exception as e:
-                print(f"❌ 处理 {file_name} 时出错: {e}")
+                print(f"❌ 审计 {display_name} 失败: {e}")
                 return
 
-        # 2. 确定分类文件夹并准备图片文件夹
-        target_folder = CLEAN_DIR if "合格" in report.status else (
-            TRASH_DIR if "垃圾" in report.status else os.path.join(SOURCE_DIR, "Need_Human_Check"))
+        # 3. 确定分类文件夹
+        if "合格" in report.status:
+            target_folder = CLEAN_DIR
+        elif "垃圾" in report.status:
+            target_folder = TRASH_DIR
+        else:
+            target_folder = os.path.join(SOURCE_DIR, "Need_Human_Check")
+            os.makedirs(target_folder, exist_ok=True)
 
+        # 4. 图片防冲突重处理
         target_pix_dir = os.path.join(target_folder, "picture")
         os.makedirs(target_pix_dir, exist_ok=True)
 
-        # 3. 同步搬运图片文件并更新 Markdown 内部引用路径
         img_links = re.findall(r'!\[.*?\]\((.*?)\)', content)
         updated_content = content
 
         for rel_img_path in img_links:
             if rel_img_path.startswith(('http', 'https')): continue
 
-            # 物理路径溯源
+            # 找到图片的绝对源路径
             abs_img_src = os.path.abspath(os.path.join(origin_dir, rel_img_path))
 
             if os.path.exists(abs_img_src):
-                img_name = os.path.basename(abs_img_src)
-                abs_img_dest = os.path.join(target_pix_dir, img_name)
-                try:
-                    # 物理复制图片
-                    shutil.copy2(abs_img_src, abs_img_dest)
+                # --- 【图片重命名逻辑】 ---
+                # 图片名同样带上 safe_file_name 前缀，防止不同文档引用同名图片导致覆盖
+                raw_img_name = os.path.basename(abs_img_src)
+                unique_img_name = f"{os.path.splitext(safe_file_name)[0]}_{raw_img_name}"
+                abs_img_dest = os.path.join(target_pix_dir, unique_img_name)
 
-                    # 修改 MD 内容中的路径：将原路径改为统一的相对路径 "picture/文件名"
-                    # 这样后续无论是本地预览还是 AI 再次读取，路径都是有效的
-                    new_rel_link = f"picture/{img_name}"
+                try:
+                    shutil.copy2(abs_img_src, abs_img_dest)
+                    # 更新 Markdown 中的引用路径为扁平化后的新路径
+                    new_rel_link = f"picture/{unique_img_name}"
                     updated_content = updated_content.replace(rel_img_path, new_rel_link)
                 except Exception as e:
-                    print(f"⚠️ 图片搬运或路径更新失败: {img_name} | {e}")
+                    print(f"⚠️ 图片 {raw_img_name} 迁移失败: {e}")
 
-        # 4. 执行移动与盖章
-        dest = os.path.join(target_folder, file_name)
+        # 5. 执行“盖章”与唯一命名移动
+        # 最终目的地：target_folder / safe_file_name
+        dest = os.path.join(target_folder, safe_file_name)
 
         try:
-            # 关键：先将更新了图片路径的内容写回原始位置
-            # 这样 save_metadata_to_file 读取的就是带有正确相对路径的文件
+            # 写回更新了图片引用路径的内容
             with open(origin_path, 'w', encoding='utf-8') as f:
                 f.write(updated_content)
 
+            # 如果合格，执行 YAML 盖章
             if "合格" in report.status:
                 save_metadata_to_file(origin_path, report)
 
-            # 移动最终的 MD 文件
+            # 执行物理移动 (Move)
             shutil.move(origin_path, dest)
         except Exception as e:
-            print(f"🚚 文件移动或打戳失败: {e}")
+            print(f"🚚 移动文件 {display_name} 失败: {e}")
 
-        # 5. 实时播报
-        print("\n" + "=" * 50)
-        print(f"✅ 处理完成 >> 📄 {file_name}")
-        print(f"⚖️ 结论: {report.status} | 分数: {report.score}")
-        print(f"📝 理由: {report.reason}")
-        print(f"🖼️ 关联图片已重定向并同步至: {target_pix_dir}")
-        print("=" * 50)
+        # 6. 播报进度
+        print(f"\n✅ 任务完成: {display_name}")
+        print(f"🛡️  唯一标识: {safe_file_name}")
+        print(f"⚖️  审计结论: {report.status} ({report.score}分)")
+        print("-" * 30)
 
 
 def save_metadata_to_file(filename: str, metadata: AuditResult) -> None:
