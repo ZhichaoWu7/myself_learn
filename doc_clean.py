@@ -26,6 +26,7 @@ qwen = ChatOpenAI(model="qwen-max",
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=8000, chunk_overlap=500)
 current_date = datetime.now().strftime('%Y-%m-%d')
 SOURCE_DIR = "/Volumes/soler/PycharmProject2/data"
+RAW_DIR = os.path.join(SOURCE_DIR, "raw")
 CLEAN_DIR = os.path.join(SOURCE_DIR, "clean")
 TRASH_DIR = os.path.join(SOURCE_DIR, "trash")
 CACHE_FILE = os.path.join(SOURCE_DIR, "cache.json") #新增缓存文件路径
@@ -207,8 +208,8 @@ async def main():
     # 启动载入缓存
     cache = load_cache(CACHE_FILE)
 
-    print(f"📂 正在扫描目录: {SOURCE_DIR}")
-    loader = DirectoryLoader(path=SOURCE_DIR, loader_cls=TextLoader, glob='*.md', recursive=False)
+    print(f"📂 正在扫描目录: {RAW_DIR}")
+    loader = DirectoryLoader(path=RAW_DIR, loader_cls=TextLoader, glob='*.md', recursive=True)
     docs = loader.load()
 
     semaphore = asyncio.Semaphore(2)
