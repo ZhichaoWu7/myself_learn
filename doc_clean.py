@@ -53,8 +53,10 @@ prompt = ChatPromptTemplate.from_template(
 - 60以下: [垃圾] 严重错误、废弃技术、或无意义内容。
 
 [输出规范]：
-直接输出一个 JSON 对象，包含 status, score, reason 字段。
-**绝对禁止将对象包裹在列表 [] 中。**
+1. 直接输出一个合法的 JSON 对象。
+2. **严禁**将 JSON 对象包裹在列表 `[]` 中。
+3. **严禁**输出任何 Markdown 格式的标题（如 # 审计报告）或解释性文本。
+4. 必须符合以下结构：{{"status": "...", "score": ..., "reason": "..."}}**
 """
 )
 class AuditResult(BaseModel):
@@ -187,6 +189,7 @@ async def processed_doc(doc: Document, semaphore: Semaphore, cache: dict) -> Non
         print(f"\n✅ 任务完成: {display_name}")
         print(f"🛡️  唯一标识: {safe_file_name}")
         print(f"⚖️  审计结论: {report.status} ({report.score}分)")
+        print(f"⚖️  理由: {report.reason})")
         print("-" * 30)
 
 
