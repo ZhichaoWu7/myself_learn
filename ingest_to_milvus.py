@@ -36,7 +36,7 @@ def is_clean_text(text: str, threshold: float = 0.85) -> bool:
     effctive_threshold = 0.6 if rate > threshold else threshold
     return rate > effctive_threshold
 
-def my_parser(doc: Document) -> List[Document]:
+def my_parser(doc: Document, window_size: int = 3) -> List[Document]:
     now_date = datetime.datetime.now().strftime("%Y%m%d")
     chunk_list = []
     content = doc.page_content
@@ -54,12 +54,15 @@ def my_parser(doc: Document) -> List[Document]:
     for i, chunk in enumerate(chunks):
         if not is_clean_text(chunk):
             continue
-
+        start = max(0, i - window_size)
+        end = min(i + window_size + 1, len(chunks))
+        full_window = "".join(chunks[start:end])
         enhanced_content = f"【审计判定：{reason}】\n原始内容：{chunk}"
         img = re.findall(r"!\[.*?\]\((picture/.*?)\)", enhanced_content)
         new_doc = Document(
             page_content = enhanced_content,
             metadata = {
+                'window_context': full_window,
                 'file_name': file_name,
                 'chunk_id': i,
                 'score': score,
