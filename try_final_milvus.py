@@ -5,6 +5,7 @@ from tqdm import tqdm
 from langchain_huggingface import HuggingFaceEmbeddings
 from pymilvus import connections, FieldSchema, CollectionSchema, Collection, DataType, utility
 from ingest_to_milvus import load_data
+from pymilvus.model.hybrid import BGEM3EmbeddingFunction
 SOURCE_DIR = "/Volumes/soler/PycharmProject2/data/clean"
 MODEL_PATH = "/Volumes/soler/PycharmProject2/models/bge-m3"
 COLLECTION_NAME = "audit_bge_m3_collection"
@@ -16,24 +17,23 @@ os.environ['TRANSFORMERS_OFFLINE'] = '1'
  #连接milvus
 print("🔌 正在连接 Milvus...")
 connections.connect("default", host="localhost", port="19530")
-embeddings = HuggingFaceEmbeddings(model_name=MODEL_PATH,
-                                           model_kwargs={"device": 'mps'},
-                                           encode_kwargs={"normalize_embeddings": True})
+embeddings = BGEM3EmbeddingFunction(
+    model_name=MODEL_PATH,
+    device='mps',
+    use_fp16=False
+    )
 
 def setup_collection():
-    try:
-        test_text = embeddings.embed_query("测试文本")
-        DIMENSION = len(test_text)
-        print(f"✅ 模型加载成功！向量维度: {DIMENSION}")
-    except Exception as e:
-        print(f"❌ 模型加载失败: {e}")
-        exit(1)
+    DIMENSION = embeddings.dim["dense"]
+    print(f"✅ 模型加载成功！稠密向量维度: {DIMENSION}")
     #搭建milvus的scheme
     field = [
         #主键
         FieldSchema(name='id', dtype=DataType.INT64, is_primary=True, auto_id=True),
-        #向量
-        FieldSchema(name='vector', dtype=DataType.FLOAT_VECTOR, dim=DIMENSION),
+        #Sparse向量
+        FieldSchema(name='sparse_vector', dtype=DataType.SPARSE_FLOAT_VECTOR),
+        #Dense向量
+        FieldSchema(name='dense_vector', dtype=DataType.FLOAT_VECTOR, dim=DIMENSION),
         #初始文本
         FieldSchema(name='content', dtype=DataType.VARCHAR, max_length=65535),
         #审计分数
@@ -51,14 +51,45 @@ def setup_collection():
     print(f"正在创建集合: {COLLECTION_NAME} ...")
     collection = Collection(name=COLLECTION_NAME, schema=schema)
     print("集合创建成功！")
+    print("📊 正在配置双路索引...")
 
-    print("正在配置HNSW索引...")
-    index_params = {"metric_type": "COSINE",
+    # 1. 稠密向量索引 (HNSW)
+    dense_index = {
         "index_type": "HNSW",
+        "metric_type": "IP",
         "params": {"M": 16, "efConstruction": 256}
-             }
-    collection.create_index(field_name="vector", index_params=index_params)
+    }
+    collection.create_index(field_name="dense_vector", index_params=dense_index)
+
+    # 2. 稀疏向量索引 (SPARSE_INVERTED_INDEX)
+    sparse_index = {
+        "index_type": "SPARSE_INVERTED_INDEX",
+        "metric_type": "IP",
+    }
+    collection.create_index(field_name="sparse_vector", index_params=sparse_index)
     return collection
+
+def insert_to_milvus(collection, model, docs):
+    # 1. 批量提取文本并生成向量
+    contents = [d.page_content for d in docs]
+    output = model.encode_documents(contents)
+    dense_vecs = output["dense"]
+    sparse_vecs = output["sparse"]
+    # 2. 准备其他标量字段
+    scores = [int(d.metadata.get('score', 0)) for d in docs]
+    metadatas = [d.metadata for d in docs]
+
+    # 3. 组装插入格式：[向量列表, 文本列表, 分数列表, 元数据列表]
+    # 对应 Schema 顺序
+    data = [
+        sparse_vecs, # 对应 sparse_vecs 字段
+        dense_vecs,  # 对应 dense_vecs 字段
+        contents,  # 对应 content 字段
+        scores,  # 对应 score 字段
+        metadatas  # 对应 metadata 字段
+    ]
+
+    collection.insert(data)
 
 def main():
     collection = setup_collection()
@@ -93,26 +124,6 @@ def main():
     print(f"📈 集合当前实体总数: {collection.num_entities}")
     print("-" * 30)
 
-
-def insert_to_milvus(collection, model, docs):
-    # 1. 批量提取文本并生成向量
-    contents = [d.page_content for d in docs]
-    vectors = model.embed_documents(contents)
-
-    # 2. 准备其他标量字段
-    scores = [int(d.metadata.get('score', 0)) for d in docs]
-    metadatas = [d.metadata for d in docs]
-
-    # 3. 组装插入格式：[向量列表, 文本列表, 分数列表, 元数据列表]
-    # 对应 Schema 顺序
-    data = [
-        vectors,  # 对应 vector 字段
-        contents,  # 对应 content 字段
-        scores,  # 对应 score 字段
-        metadatas  # 对应 metadata 字段
-    ]
-
-    collection.insert(data)
 
 
 if __name__ == "__main__":
