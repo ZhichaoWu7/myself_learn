@@ -11,7 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # --- 配置区 ---
 SOURCE_DIR = "/Volumes/soler/PycharmProject2/data/clean"
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1000,
+    chunk_size=300,
     chunk_overlap=150,
     separators=["\n\n", "\n", "。", " ", ""]
 )
