@@ -1,8 +1,6 @@
 import os
 import time
-import re
 from tqdm import tqdm
-from langchain_huggingface import HuggingFaceEmbeddings
 from pymilvus import connections, FieldSchema, CollectionSchema, Collection, DataType, utility
 from ingest_to_milvus import load_data
 from pymilvus.model.hybrid import BGEM3EmbeddingFunction
@@ -75,6 +73,12 @@ def insert_to_milvus(collection, model, docs):
     output = model.encode_documents(contents)
     dense_vecs = output["dense"]
     sparse_vecs = output["sparse"]
+
+    formatted_sparse_vecs = []
+    # raw_sparse_vecs 是 scipy 格式更改
+    for i in range(sparse_vecs.shape[0]):
+        row = sparse_vecs[i].tocoo()
+        formatted_sparse_vecs.append(dict(zip(row.col, row.data)))
     # 2. 准备其他标量字段
     scores = [int(d.metadata.get('score', 0)) for d in docs]
     metadatas = [d.metadata for d in docs]
@@ -82,7 +86,7 @@ def insert_to_milvus(collection, model, docs):
     # 3. 组装插入格式：[向量列表, 文本列表, 分数列表, 元数据列表]
     # 对应 Schema 顺序
     data = [
-        sparse_vecs, # 对应 sparse_vecs 字段
+        formatted_sparse_vecs, # 对应 sparse_vecs 字段
         dense_vecs,  # 对应 dense_vecs 字段
         contents,  # 对应 content 字段
         scores,  # 对应 score 字段
